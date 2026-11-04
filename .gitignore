@@ -1,0 +1,36 @@
+# 构建产物
+/build/
+/reports/
+/test_reports/
+/.qodo/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+*.html
+*.pdf
+*.xlsx
+*.ini
+nginx_weekly_report
+
+# 前端
+/web/node_modules/
+/web/.vite/
+/web/dist/
+# 注意: web/dist 通过 go:embed 打入二进制，因此需要保留在版本库中
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
+*.log
+
+# 临时验证文件 / 样例（如 Xshell 备份，含真实主机与凭据，勿入库）
+.tmp_*/
+
+# 本地配置
+/data/
+*.local
