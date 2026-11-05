@@ -276,3 +276,40 @@ func TestFindLogFilesSkipsNonRegularFallback(t *testing.T) {
 		t.Fatalf("files=%v fallback=%v", files, fallback)
 	}
 }
+
+func TestFindLogFilesSiteRecursive(t *testing.T) {
+	root := t.TempDir()
+	must := func(p string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(filepath.Join(root, "top.log"))
+	must(filepath.Join(root, "ad.kmrd.cn", "access.log"))
+	must(filepath.Join(root, "api.kmrd.cn", "access.log.gz"))
+
+	cfg := config.Default()
+	cfg.LogDir = root
+	cfg.LogPattern = "*.log*"
+	cfg.SiteEnabled = true
+	files, _, err := findLogFiles(cfg, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 3 {
+		t.Fatalf("site recursive files=%v", files)
+	}
+
+	cfg.SiteEnabled = false
+	files, _, err = findLogFiles(cfg, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || filepath.Base(files[0]) != "top.log" {
+		t.Fatalf("non-site files=%v", files)
+	}
+}

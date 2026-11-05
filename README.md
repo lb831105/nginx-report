@@ -305,24 +305,24 @@ go run ./cmd/nginx-report -mode daily -logdir /data/_log/backup -debug
 | `-time-field` | `auto` | 响应时间取字段：`auto`（上游优先，缺失回退 `responsetime`）/ `upstream` / `response` |
 | `-slow-ms` | `1000` | 慢请求阈值（毫秒）；`-slow-ms 500` 表示 >500ms 算慢请求 |
 | `-exclude-bots` | `false` | 按 UA 排除爬虫/探针/监控请求（Googlebot、curl、python-requests、Prometheus 等），默认关闭 |
-| `-log-format` | `auto` | 输入日志格式：`auto`（默认，自动识别）/ `json` / `combined` / `csv` / 直接传 nginx `log_format` 模板 |
+| `-log-format` | `auto` | 输入日志格式：`auto`（默认）/ `json` / `combined` / `combined_host`（combined 末尾带 host）/ `csv` / 直接传 nginx `log_format` 模板 |
 | `-csv-fields` | 空 | CSV 没有表头时的列顺序，如 `time,client,method,uri,status,size` |
 | `-csv-skip-header` | `false` | CSV 首行是表头但列名无法识别时，配合 `-log-format csv -csv-fields` 强制跳过第一行 |
 | `-json-fields` | 空 | 任意 JSON 字段名映射，如 `ts=time,cip=client,u=uri,st=status` |
 | `-site-map` | 空 | 多站点映射文件；每行 `站点 = 文件模式`，相对 `-logdir`，支持通配符 |
 | `-site-alias-map` | 空 | 站点别名映射文件；每行 `别名 = 主域名`，如 `www.example.com = example.com` |
 | `-site-report` | `both` | 站点报告范围：`aggregate`（只出全站）/ `both`（全站 + 每站点，默认）/ `per`（只出每站点） |
-| `-site-from` | `auto` | 站点来源：`auto`（字段 > 映射 > 文件名 > 未识别）/ `field` / `map` / `filename` |
+| `-site-from` | `auto` | 站点来源：`auto`（字段 > 映射 > 文件名 > 目录名 > 未识别）/ `field` / `map` / `filename` / `dir` |
 | `-site-field` | 空 | 行内站点字段名；空=自动尝试 `domain`/`host`/`http_host`/`server_name` 等别名 |
 | `-site-name` | 空 | 强制所有日志归属该站点（单文件/单站点目录最省事） |
 | `-site` | 空 | 只输出指定站点，逗号分隔；仅 weekly / 单文件模式 |
 | `-site-ip-mode` | `separate` | 行内 IP 直连：`separate` 单独站点 / `inherit` 继承文件站点 / `ignore` 忽略行内 IP |
-| `-site-ip-report` | `none` | IP 直连报告：`none`（只在全站展示）/ `group`（合并一份）/ `per-ip`（每个 IP 一份） |
+| `-site-ip-report` | `none` | IP 直连报告：`none`（只在全站展示；`-site-name` 强制站点仍生成）/ `group`（合并一份）/ `per-ip`（每个 IP 一份） |
 | `-site-strip-www` | `false` | 把 `www.example.com` 归并到 `example.com`（应用别名前） |
-| `-site-max` | `1000` | 单文件最大站点数；超出归入 `(其他站点)`，总数不丢 |
+| `-site-max` | `1000` | 单个日志文件最大站点数；超出归入 `(其他站点)`，总数不丢 |
 | `-site-min-pv` | `0` | 小于该 PV 的站点不生成独立报告（全站对比仍显示） |
 | `-site-max-report` | `100` | 最多生成多少个独立站点报告 |
-| `-pattern` | `28888_access_json.log*` | 日志文件名匹配模式（支持 `*`；`.gz` 压缩包自动解压） |
+| `-pattern` | `28888_access_json.log*` | 日志文件名匹配模式（支持 `*`；`.gz` 压缩包自动解压）；站点模式下不含 `/` 时会递归子目录 |
 | `-reportdir` | `/data/reports` | 报告输出目录（历史数据自动放其下 `history/`） |
 | `-daily-at` | `00:10` | **serve**：每天统计头一天的时间 `HH:MM` |
 | `-weekly-day` | `1` | **serve**：周汇总在周几（1=周一 … 7=周日） |
@@ -353,7 +353,8 @@ go run ./cmd/nginx-report -mode daily -logdir /data/_log/backup -debug
 2. 行内 `domain` / `host` / `http_host` / `server_name` 等字段（`-site-field` 可指定字段名）
 3. `-site-map` 文件映射
 4. 文件名推断（`example.com_2026-10-30.log`、`1.2.3.4.log`；不会把 `access.log` 当域名）
-5. `(未识别站点)` 兜底
+5. 日志文件所在目录名（`/data/_log/ad.kmrd.cn/access.log`，`-site-from dir` 或 auto 自动尝试）
+6. `(未识别站点)` 兜底
 
 **站点映射文件** `sites.conf`：
 
@@ -372,6 +373,7 @@ shop.example.com = example.com
 
 复合场景都能处理：
 
+- **一站点一个目录**：`/data/_log/<domain>/access.log`；站点模式下 `-pattern '*.log*'` 会递归扫描子目录，目录名自动作为站点名（也可显式 `-site-from dir`）。
 - **一站点一个文件**：`-site-map` 或文件名推断；无日期的 `api_access.log` 也会在站点模式下处理，不会被“存在带日期文件”跳过。
 - **共享日志带 domain/host 字段**：JSON、CSV 表头、自定义 `log_format` 的 `$host`/`$server_name` 都支持；同一行有多个域名时取第一个合法值。
 - **共享日志没有 host 字段**：默认 combined 不猜测域名；整体归入 `-site-map`/文件名/`-site-name`，否则进入 `(未识别站点)`。
@@ -386,7 +388,8 @@ reports/
 ├── sites_index.html / sites_index.json   # 站点索引
 └── sites/
     ├── domain/example.com/...            # 每域名一份客户版 + Ops 版
-    └── ip/203.0.113.10/...               # -site-ip-report per-ip 时
+    ├── ip/203.0.113.10/...               # -site-ip-report per-ip 时
+    └── ip/_group/...                     # -site-ip-report group 时（所有 IP 合并）
 ```
 
 单文件模式同样输出 `single_report_*` 到对应站点目录。日记录会把各站点当天统计写入根记录 `sites` 字段；旧日记录没有站点明细时，周报会自动回退读日志重算。

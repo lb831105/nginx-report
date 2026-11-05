@@ -21,6 +21,7 @@ type Rule struct {
 type Resolver struct {
 	LogDir   string
 	StripWWW bool
+	Mode     string // auto / field / map / filename / dir
 	Rules    []Rule
 	Aliases  map[string]string
 	Forced   *Info
@@ -28,7 +29,7 @@ type Resolver struct {
 
 // NewResolver 创建空解析器。
 func NewResolver(logDir string, stripWWW bool) *Resolver {
-	return &Resolver{LogDir: logDir, StripWWW: stripWWW, Aliases: make(map[string]string)}
+	return &Resolver{LogDir: logDir, StripWWW: stripWWW, Mode: "auto", Aliases: make(map[string]string)}
 }
 
 // LoadMap 读取映射文件，格式：
@@ -113,6 +114,9 @@ func (r *Resolver) LoadAliases(path string) error {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
+		if i := strings.Index(line, " #"); i >= 0 {
+			line = strings.TrimSpace(line[:i])
+		}
 		k, v, ok := strings.Cut(line, "=")
 		if !ok {
 			return fmt.Errorf("%s:%d 别名格式应为 别名 = 主站点", path, lineNo)
@@ -153,32 +157,82 @@ func (r *Resolver) Resolve(raw string) (Info, bool) {
 	return info, true
 }
 
-// ResolveFile 返回文件的默认站点：强制站点 > map > 文件名 > 未识别。
+// ResolveFile 返回文件的默认站点。
+// auto：强制站点 > map > 文件名 > 目录名 > 未识别；
+// map / filename / dir 只使用对应来源，field 不使用文件级来源。
 func (r *Resolver) ResolveFile(path string) Info {
 	if r.Forced != nil {
 		return *r.Forced
 	}
+	mode := r.Mode
+	if mode == "" {
+		mode = "auto"
+	}
+	switch mode {
+	case "map":
+		if info, ok := r.resolveMap(path); ok {
+			return r.withAlias(info)
+		}
+		return Unknown()
+	case "filename":
+		if info, ok := r.resolveFilename(path); ok {
+			return r.withAlias(info)
+		}
+		return Unknown()
+	case "dir":
+		if info, ok := r.resolveDir(path); ok {
+			return r.withAlias(info)
+		}
+		return Unknown()
+	case "field":
+		return Unknown()
+	}
+	if info, ok := r.resolveMap(path); ok {
+		return r.withAlias(info)
+	}
+	if info, ok := r.resolveFilename(path); ok {
+		return r.withAlias(info)
+	}
+	if info, ok := r.resolveDir(path); ok {
+		return r.withAlias(info)
+	}
+	return Unknown()
+}
+
+func (r *Resolver) withAlias(info Info) Info {
+	if info.Kind == KindDomain {
+		info = ApplyAlias(info, r.Aliases)
+	}
+	return info
+}
+
+func (r *Resolver) resolveMap(path string) (Info, bool) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		abs = path
 	}
 	for _, rule := range r.Rules {
 		if ok, _ := filepath.Match(rule.Pattern, abs); ok {
-			info := rule.Info
-			if info.Kind == KindDomain {
-				info = ApplyAlias(info, r.Aliases)
-			}
-			return info
+			return rule.Info, true
 		}
 	}
-	if info, ok := FromFilename(path, r.StripWWW); ok {
+	return Info{}, false
+}
+
+func (r *Resolver) resolveFilename(path string) (Info, bool) {
+	info, ok := FromFilename(path, r.StripWWW)
+	if ok {
 		info.Source = "filename"
-		if info.Kind == KindDomain {
-			info = ApplyAlias(info, r.Aliases)
-		}
-		return info
 	}
-	return Unknown()
+	return info, ok
+}
+
+func (r *Resolver) resolveDir(path string) (Info, bool) {
+	info, ok := FromDir(path, r.LogDir, r.StripWWW)
+	if ok {
+		info.Source = "dir"
+	}
+	return info, ok
 }
 
 // ParseFilter 把 -site 的值归一化成 key 集合。

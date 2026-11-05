@@ -1202,6 +1202,9 @@ func TestSkipStaticRecords(t *testing.T) {
 	if st.StaticBytes != 14000 {
 		t.Errorf("StaticBytes=%d, want 14000", st.StaticBytes)
 	}
+	if st.StaticSkippedDay["2026-09-01"] != 2 || st.StaticBytesDay["2026-09-01"] != 14000 {
+		t.Errorf("static day maps = %+v / %+v", st.StaticSkippedDay, st.StaticBytesDay)
+	}
 	if st.SizeTotal != 1000 {
 		t.Errorf("SizeTotal=%d, want 1000（静态资源的流量不应计入）", st.SizeTotal)
 	}
@@ -1897,5 +1900,26 @@ func TestFieldLengthCaps(t *testing.T) {
 		if len(status) > maxShortKey+3 {
 			t.Fatalf("状态码 key 未截断: %d", len(status))
 		}
+	}
+}
+
+func TestMergeFromLegacyTimedCount(t *testing.T) {
+	legacy := NewAgg()
+	legacy.Total = 100
+	legacy.TimeSum = 50
+	legacy.TimeBuckets[10] = 100
+
+	newer := NewAgg()
+	newer.Total = 10
+	newer.TimedCount = 10
+	newer.TimeSum = 10
+	newer.TimeBuckets[20] = 10
+
+	legacy.MergeFrom(newer)
+	if legacy.TimedCount != 110 {
+		t.Fatalf("TimedCount=%d, want 110", legacy.TimedCount)
+	}
+	if got, want := legacy.AvgTime(), 60.0/110.0; got < want-1e-9 || got > want+1e-9 {
+		t.Fatalf("AvgTime=%v, want %v", got, want)
 	}
 }

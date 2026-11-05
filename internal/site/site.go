@@ -106,17 +106,29 @@ var (
 // Normalize 把日志字段/文件名里的站点值归一化。
 // 支持域名、URL、host:port、IPv4、IPv6；多值取第一个合法值。
 func Normalize(raw string, stripWWW bool) (Info, bool) {
+	info, ok, _ := NormalizeWithCount(raw, stripWWW)
+	return info, ok
+}
+
+// NormalizeWithCount 返回第一个合法站点，以及合法值的个数。
+// 同一字段出现多个域名时取第一个，调用方据此累计 MultiDomainLines。
+func NormalizeWithCount(raw string, stripWWW bool) (Info, bool, int) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return Info{}, false
+		return Info{}, false, 0
 	}
 	// 字段可能来自 server_name 的多值形式："example.com www.example.com"
+	var first Info
+	count := 0
 	for _, part := range splitValues(raw) {
 		if info, ok := normalizeOne(part, stripWWW); ok {
-			return info, true
+			if count == 0 {
+				first = info
+			}
+			count++
 		}
 	}
-	return Info{}, false
+	return first, count > 0, count
 }
 
 func splitValues(s string) []string {
@@ -195,6 +207,10 @@ func normalizeOne(raw string, stripWWW bool) (Info, bool) {
 	if !strings.Contains(host, ".") && host != "localhost" {
 		return Info{}, false
 	}
+	if lastLabelNumeric(host) {
+		// 2026.10.30 这类日期目录不是域名；真实 TLD 不会是纯数字。
+		return Info{}, false
+	}
 	if placeholderNames[host] || !validHost(host) {
 		return Info{}, false
 	}
@@ -204,6 +220,19 @@ func normalizeOne(raw string, stripWWW bool) (Info, bool) {
 func ipInfo(addr netip.Addr) Info {
 	name := addr.String()
 	return Info{Key: keyPrefix(KindIP) + name, Name: name, Kind: KindIP}
+}
+
+func lastLabelNumeric(host string) bool {
+	i := strings.LastIndexByte(host, '.')
+	if i < 0 || i+1 >= len(host) {
+		return false
+	}
+	for _, c := range host[i+1:] {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func validHost(host string) bool {
@@ -255,7 +284,7 @@ func ApplyAlias(info Info, aliases map[string]string) Info {
 }
 
 var (
-	fileDateRe = regexp.MustCompile(`(?:^|[_-])\d{4}-\d{2}-\d{2}(?:$|[_-])`)
+	fileDateRe = regexp.MustCompile(`(?:^|[._-])\d{4}-\d{2}-\d{2}(?:$|[._-])`)
 	fileIPRe   = regexp.MustCompile(`(?:^|[_-])(\d{1,3}(?:\.\d{1,3}){3})(?:$|[_-])`)
 )
 
@@ -325,6 +354,48 @@ func FromFilename(name string, stripWWW bool) (Info, bool) {
 		return Info{}, false
 	}
 	return Normalize(base, stripWWW)
+}
+
+// FromDir 从日志文件所在目录推断站点。
+// 适用于「一个域名一个目录」的部署：/data/_log/ad.kmrd.cn/access.log。
+// 从最近父目录逐级向上，直到 root 为止，返回第一个合法域名/IP。
+func FromDir(path, root string, stripWWW bool) (Info, bool) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return Info{}, false
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		rootAbs = root
+	}
+	for dir := filepath.Dir(abs); ; dir = filepath.Dir(dir) {
+		base := filepath.Base(dir)
+		if base != "" && base != "." && base != string(filepath.Separator) {
+			if info, ok := normalizeOne(base, stripWWW); ok && IsKnownKind(info.Kind) {
+				return info, true
+			}
+		}
+		// root 本身也要检查：单文件模式 -logdir /data/_log/ad.kmrd.cn/access.log
+		// 的根目录就是站点目录。检查完 root 后停止，避免把 /data 当站点。
+		if samePath(dir, rootAbs) {
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+	}
+	return Info{}, false
+}
+
+func samePath(a, b string) bool {
+	if a == b {
+		return true
+	}
+	if a == "" || b == "" {
+		return false
+	}
+	return strings.EqualFold(filepath.Clean(a), filepath.Clean(b))
 }
 
 // SafeDir 返回可直接用于报告目录的安全相对路径。

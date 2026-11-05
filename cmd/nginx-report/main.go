@@ -75,7 +75,7 @@ func main() {
 	siteMapFlag := flag.String("site-map", cfg.SiteMap, "站点映射文件，格式：域名 = 文件匹配模式")
 	siteAliasFlag := flag.String("site-alias-map", cfg.SiteAliasMap, "站点别名映射文件，格式：别名 = 主域名")
 	siteReportFlag := flag.String("site-report", cfg.SiteReport, "站点报告范围: aggregate(仅全站) / both(全站+每站点) / per(仅每站点)")
-	siteFromFlag := flag.String("site-from", cfg.SiteFrom, "站点来源: auto / field / map / filename")
+	siteFromFlag := flag.String("site-from", cfg.SiteFrom, "站点来源: auto / field / map / filename / dir")
 	siteFieldFlag := flag.String("site-field", cfg.SiteField, "行内站点字段名，如 domain、server_name、host")
 	siteNameFlag := flag.String("site-name", cfg.SiteName, "强制所有日志归属该站点（适合单文件）")
 	siteFilterFlag := flag.String("site", cfg.SiteFilter, "只输出指定站点，逗号分隔")
@@ -215,9 +215,9 @@ func main() {
 		os.Exit(1)
 	}
 	switch cfg.SiteFrom {
-	case "auto", "field", "map", "filename":
+	case "auto", "field", "map", "filename", "dir":
 	default:
-		logger.Error("-site-from 无效: %q（可选 auto / field / map / filename）", cfg.SiteFrom)
+		logger.Error("-site-from 无效: %q（可选 auto / field / map / filename / dir）", cfg.SiteFrom)
 		logger.CloseLogFile()
 		os.Exit(1)
 	}
@@ -258,6 +258,9 @@ func main() {
 		}
 		if cfg.SiteMax <= 0 {
 			cfg.SiteMax = 1000
+		}
+		if cfg.SiteMaxReport <= 0 {
+			cfg.SiteMaxReport = 100
 		}
 		if cfg.SiteMap != "" {
 			r := site.NewResolver(cfg.LogDir, cfg.SiteStripWWW)
@@ -448,6 +451,13 @@ func usage() {
       -site-from auto -site-report both -site-ip-report group \
       -reportdir /data/reports
 
+  # 14) 一个域名一个目录：/data/_log/<domain>/access.log
+  #     站点模式下 pattern 不含 / 会递归扫描子目录，目录名作为站点
+  %s -mode weekly \
+      -logdir /data/_log -pattern '*.log*' \
+      -site-from dir -site-report per -site-ip-report group \
+      -reportdir /data/reports
+
 关键参数速查:
   -logdir      日志目录，或直接给一个日志文件（.gz 自动解压）
   -pattern     目录模式下匹配文件名（默认 28888_access_json.log*）
@@ -457,7 +467,7 @@ func usage() {
   -from        只统计每天 HH:MM 之后（如 08:00，对应原脚本 START_TIME）
   -preview     只出报告，不读写历史（复盘 gz / 临时看一天时用）
   -skip-static 解析时排除 css/js/图片/字体（默认 true）
-  -log-format  输入日志格式：auto（默认）/ json / combined / csv / nginx log_format 模板
+  -log-format  输入日志格式：auto（默认）/ json / combined / combined_host / csv / nginx log_format 模板
   -csv-fields  CSV 无表头时的列顺序，如 time,client,method,uri,status,size
   -csv-skip-header CSV 首行是表头但列名无法识别时，配合 -log-format csv -csv-fields 强制跳过
   -json-fields 自定义 JSON 字段映射，如 ts=time,cip=client,u=uri,st=status
@@ -472,7 +482,7 @@ func usage() {
   -site-map    站点映射文件，如 example.com = example.com_*.log
   -site-alias-map 站点别名映射，如 www.example.com = example.com
   -site-report 站点报告范围：aggregate / both（默认）/ per
-  -site-from   站点来源：auto（默认）/ field / map / filename
+  -site-from   站点来源：auto（默认）/ field / map / filename / dir
   -site-field  行内站点字段名，如 domain / server_name / host
   -site-name   强制所有日志归属一个站点（适合单文件/单站点目录）
   -site        只输出指定站点，逗号分隔（仅 weekly / 单文件）
@@ -484,7 +494,7 @@ func usage() {
   -site-max-report 最多生成多少个独立站点报告（默认 100）
 
 参数说明:
-`, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog)
+`, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog)
 	flag.PrintDefaults()
 }
 
@@ -514,11 +524,25 @@ func runServe(cfg *config.Config) error {
 	// 判断"这一周的周报是否已经出过"：要按实际输出格式找文件，
 	// 否则 -format pdf 时永远找不到 html，重启后会白跑一遍。
 	weeklyReportDone := func(start, end string) bool {
-		if cfg.SiteEnabled && cfg.SiteReport == "per" {
-			_, err := os.Stat(filepath.Join(cfg.ReportDir, "sites_index.html"))
-			return err == nil
-		}
 		base := fmt.Sprintf("weekly_report_%s_to_%s", start, end)
+		if cfg.SiteEnabled && cfg.SiteReport == "per" {
+			// per 模式没有全站报告，用任意一个站点目录里的本期报告判断。
+			found := false
+			root := filepath.Join(cfg.ReportDir, "sites")
+			_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+				if err != nil || d == nil || d.IsDir() {
+					return nil
+				}
+				for _, f := range report.Formats(cfg.Format) {
+					if d.Name() == base+"."+f {
+						found = true
+						return fs.SkipAll
+					}
+				}
+				return nil
+			})
+			return found
+		}
 		for _, f := range report.Formats(cfg.Format) {
 			if _, err := os.Stat(filepath.Join(cfg.ReportDir, base+"."+f)); err == nil {
 				return true
@@ -735,6 +759,35 @@ func dateRange(start, end string) []string {
 	return out
 }
 
+// logFilesTree 在 root 下递归查找文件名匹配 pattern 的普通文件。
+// 只在站点模式且 pattern 不含路径分隔符时使用，保持旧目录模式只扫顶层。
+func logFilesTree(root, pattern string) ([]string, error) {
+	var out []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if path == root {
+				return err
+			}
+			// 单个站点目录无权限时继续扫其他目录，但保留可排查的日志。
+			logger.Debug("跳过无法访问的日志路径 %s: %v", path, err)
+			return nil
+		}
+		if d == nil || d.IsDir() {
+			return nil
+		}
+		ok, merr := filepath.Match(pattern, d.Name())
+		if merr != nil {
+			return merr
+		}
+		if ok {
+			out = append(out, path)
+		}
+		return nil
+	})
+	sort.Strings(out)
+	return out, err
+}
+
 // findLogFiles 按文件名日期挑出候选日志文件。
 //
 // 文件名日期窗口在 [start, end] 基础上放宽 1 天：不同轮转方案的命名既可能用
@@ -758,7 +811,16 @@ func findLogFiles(cfg *config.Config, start, end string) (files []string, fallba
 	}
 
 	pattern := filepath.Join(cfg.LogDir, cfg.LogPattern)
-	all, globErr := filepath.Glob(pattern)
+	var all []string
+	var globErr error
+	if cfg.SiteEnabled && !strings.ContainsAny(cfg.LogPattern, `/\`) {
+		// 多站点常见布局：/data/_log/<domain>/access.log。
+		// 站点模式下没有路径分隔符的模式按文件名递归匹配，避免用户为每个域名
+		// 单独跑一次，也避免把几十个站点目录漏掉。
+		all, globErr = logFilesTree(cfg.LogDir, cfg.LogPattern)
+	} else {
+		all, globErr = filepath.Glob(pattern)
+	}
 	if globErr != nil {
 		return nil, false, globErr
 	}
@@ -901,7 +963,7 @@ func runDaily(cfg *config.Config, day string) error {
 		return noDataError(day, day, grand)
 	}
 
-	daily := newDailyWithSites(day, agg, partial, grand.Sites, grand)
+	daily := newDailyWithSites(day, agg, partial, grand.Sites, grand, true, nil)
 	if err := history.SaveDaily(cfg.HistoryDir, day, daily); err != nil {
 		return fmt.Errorf("保存日记录失败: %v", err)
 	}
@@ -996,7 +1058,7 @@ func runWeekly(cfg *config.Config, start, end string) error {
 			for key, sd := range d.Sites {
 				grand.MergeSiteDay(key, day, sd.ToAgg(), sd.SiteKind, sd.SiteName,
 					sd.StaticSkipped, sd.StaticBytes, sd.BotSkipped, 0, 0,
-					sd.SiteConflicts, sd.SiteInvalid, sd.SiteSourceCnt)
+					sd.SiteConflicts, sd.SiteInvalid, sd.SiteMultiDomain, sd.SiteSourceCnt)
 			}
 		}
 		logger.Debug("载入日记录 %s: total=%d", day, d.Total)
@@ -1053,7 +1115,15 @@ func runWeekly(cfg *config.Config, start, end string) error {
 				logger.Warn("检测到多种日志格式混合: %s", strings.Join(names, ", "))
 			}
 
+			rootMetaSaved := false
+			dailySiteMeta := make(map[string]bool)
+			grandSiteMeta := make(map[string]bool)
 			for _, day := range missing {
+				// 静态/爬虫排除量属于“原始行数”，即使当天没有业务请求也要计入；
+				// 否则「某天只有静态资源」时周报的排除总数会少算。
+				grand.StaticSkipped += dayStat(dayStats.StaticSkippedDay, day, 0)
+				grand.StaticBytes += dayStat(dayStats.StaticBytesDay, day, 0)
+				grand.BotSkipped += dayStat(dayStats.BotSkippedDay, day, 0)
 				agg := dayStats.DayAgg(day)
 				if agg == nil || agg.Total == 0 {
 					logger.Warn("%s 没有日志数据", day)
@@ -1066,17 +1136,40 @@ func runWeekly(cfg *config.Config, start, end string) error {
 						if sa == nil || sa.Total == 0 {
 							continue
 						}
+						staticSkipped := dayStat(ss.StaticSkippedDay, day, ss.StaticSkipped)
+						staticBytes := dayStat(ss.StaticBytesDay, day, ss.StaticBytes)
+						botSkipped := dayStat(ss.BotSkippedDay, day, ss.BotSkipped)
+						var outOfRange, skipped, conflicts, invalid, multi int64
+						var sources map[string]int64
+						if !grandSiteMeta[key] {
+							// 这些计数是整段回退扫描的总量，不能每补一天都加一遍。
+							outOfRange, skipped = ss.OutOfRange, ss.Skipped
+							conflicts, invalid, multi = ss.Conflicts, ss.Invalid, ss.MultiDomainLines
+							sources = ss.SourceCnt
+							grandSiteMeta[key] = true
+						}
 						grand.MergeSiteDay(key, day, sa, string(ss.Kind), ss.Name,
-							ss.StaticSkipped, ss.StaticBytes, ss.BotSkipped, ss.OutOfRange, ss.Skipped,
-							ss.Conflicts, ss.Invalid, ss.SourceCnt)
+							staticSkipped, staticBytes, botSkipped, outOfRange, skipped,
+							conflicts, invalid, multi, sources)
 					}
 				}
 				if forceLogs {
 					continue
 				}
-				if err := history.SaveDaily(cfg.HistoryDir, day, newDailyWithSites(day, agg, false, dayStats.Sites, dayStats)); err != nil {
+				siteMeta := make(map[string]bool)
+				for key, ss := range dayStats.Sites {
+					if ss.Days[day] != nil && ss.Days[day].Total > 0 && !dailySiteMeta[key] {
+						siteMeta[key] = true
+					}
+				}
+				if err := history.SaveDaily(cfg.HistoryDir, day,
+					newDailyWithSites(day, agg, false, dayStats.Sites, dayStats, !rootMetaSaved, siteMeta)); err != nil {
 					logger.Warn("补写日记录失败 %s: %v", day, err)
 				} else {
+					rootMetaSaved = true
+					for key := range siteMeta {
+						dailySiteMeta[key] = true
+					}
 					logger.Info("已补写日记录: %s", day)
 				}
 			}
@@ -1093,6 +1186,16 @@ func runWeekly(cfg *config.Config, start, end string) error {
 			continue
 		}
 		grand.MergeDay(day, d.ToAgg())
+		grand.StaticSkipped += d.StaticSkipped
+		grand.StaticBytes += d.StaticBytes
+		grand.BotSkipped += d.BotSkipped
+		if cfg.SiteEnabled {
+			for key, sd := range d.Sites {
+				grand.MergeSiteDay(key, day, sd.ToAgg(), sd.SiteKind, sd.SiteName,
+					sd.StaticSkipped, sd.StaticBytes, sd.BotSkipped, 0, 0,
+					sd.SiteConflicts, sd.SiteInvalid, sd.SiteMultiDomain, sd.SiteSourceCnt)
+			}
+		}
 		logger.Warn("%s 仅有当天的不完整统计（%d 条，partial），周报中该日数据可能偏少", day, d.Total)
 	}
 
@@ -1413,10 +1516,10 @@ func finishWeekly(cfg *config.Config, grand *analyzer.FileStats, start, end stri
 
 	rows := siteRowList(cfg, grand)
 	if cfg.SiteEnabled {
-		if len(rows) == 0 {
+		if len(rows) == 0 && len(grand.Sites) == 0 {
 			logger.Warn("未识别到任何站点；默认 combined 不包含 host/domain 字段，请使用 -site-map / -site-name 或修改 log_format")
 		}
-		var unknown, conflicts, invalid int64
+		var unknown, conflicts, invalid, multi int64
 		for _, row := range rows {
 			if row.Kind == string(site.KindUnknown) {
 				unknown += row.Total
@@ -1428,6 +1531,7 @@ func finishWeekly(cfg *config.Config, grand *analyzer.FileStats, start, end stri
 			}
 			conflicts += ss.Conflicts
 			invalid += ss.Invalid
+			multi += ss.MultiDomainLines
 		}
 		if unknown > 0 {
 			logger.Warn("有 %d 条记录无法识别站点，已归入 (未识别站点)；可用 -site-map / -site-name / -site-field 补充", unknown)
@@ -1437,6 +1541,9 @@ func finishWeekly(cfg *config.Config, grand *analyzer.FileStats, start, end stri
 		}
 		if invalid > 0 {
 			logger.Warn("检测到 %d 条行内站点值无效，已回退文件级站点，未丢行", invalid)
+		}
+		if multi > 0 {
+			logger.Warn("检测到 %d 条记录包含多个域名，已取第一个合法值", multi)
 		}
 	}
 	in := report.Input{
@@ -1481,7 +1588,7 @@ func finishWeekly(cfg *config.Config, grand *analyzer.FileStats, start, end stri
 			if row.Kind == string(site.KindUnknown) || row.Kind == string(site.KindOther) {
 				continue
 			}
-			if row.Kind == string(site.KindIP) && cfg.SiteIPReport != "per-ip" {
+			if row.Kind == string(site.KindIP) && cfg.SiteIPReport != "per-ip" && cfg.SiteName == "" {
 				continue
 			}
 			ss := grand.Sites[row.Key]
@@ -1502,7 +1609,7 @@ func finishWeekly(cfg *config.Config, grand *analyzer.FileStats, start, end stri
 		}
 	}
 	// -site-ip-report group：把 IP 直连站点合并成一份报告，避免每 IP 一个目录。
-	if cfg.SiteEnabled && cfg.SiteReport != "aggregate" && cfg.SiteIPReport == "group" {
+	if cfg.SiteEnabled && cfg.SiteReport != "aggregate" && cfg.SiteIPReport == "group" && cfg.SiteName == "" {
 		hasIP := false
 		for _, row := range rows {
 			if row.Kind == string(site.KindIP) {
@@ -1596,6 +1703,7 @@ func processOptions(cfg *config.Config, start, end string) analyzer.Options {
 // newSiteResolver 构建站点解析器。只有启用站点功能时调用。
 func newSiteResolver(cfg *config.Config) (*site.Resolver, error) {
 	r := site.NewResolver(cfg.LogDir, cfg.SiteStripWWW)
+	r.Mode = cfg.SiteFrom
 	if cfg.SiteMap != "" {
 		if err := r.LoadMap(cfg.SiteMap); err != nil {
 			return nil, err
@@ -1659,15 +1767,25 @@ func noDataError(start, end string, st *analyzer.FileStats) error {
 		scope, st.Total, st.OutOfRange, st.Skipped, hint)
 }
 
+// dayStat 取按天计数；map 存在但当天没有记录时返回 0，
+// map 不存在（手工构造/旧代码）时回退到总量。
+func dayStat(m map[string]int64, day string, total int64) int64 {
+	if m == nil {
+		return total
+	}
+	return m[day]
+}
+
 // newDailyWithSites 构造根日记录，并把各站点当天统计放进 Sites。
 // 根记录仍然保存全站汇总，兼容旧版周报/历史；站点数据用于多站点周报。
 func newDailyWithSites(day string, agg *analyzer.Agg, partial bool,
-	sites map[string]*analyzer.SiteStats, root *analyzer.FileStats) *history.Daily {
+	sites map[string]*analyzer.SiteStats, root *analyzer.FileStats,
+	includeRootMeta bool, metaSites map[string]bool) *history.Daily {
 	d := history.NewDaily(day, agg, partial)
 	if root != nil {
-		d.StaticSkipped = root.StaticSkipped
-		d.StaticBytes = root.StaticBytes
-		d.BotSkipped = root.BotSkipped
+		d.StaticSkipped = dayStat(root.StaticSkippedDay, day, root.StaticSkipped)
+		d.StaticBytes = dayStat(root.StaticBytesDay, day, root.StaticBytes)
+		d.BotSkipped = dayStat(root.BotSkippedDay, day, root.BotSkipped)
 	}
 	if len(sites) == 0 {
 		return d
@@ -1682,12 +1800,16 @@ func newDailyWithSites(day string, agg *analyzer.Agg, partial bool,
 		sd.Site = key
 		sd.SiteKind = string(ss.Kind)
 		sd.SiteName = ss.Name
-		sd.StaticSkipped = ss.StaticSkipped
-		sd.StaticBytes = ss.StaticBytes
-		sd.BotSkipped = ss.BotSkipped
-		sd.SiteConflicts = ss.Conflicts
-		sd.SiteInvalid = ss.Invalid
-		if len(ss.SourceCnt) > 0 {
+		sd.StaticSkipped = dayStat(ss.StaticSkippedDay, day, ss.StaticSkipped)
+		sd.StaticBytes = dayStat(ss.StaticBytesDay, day, ss.StaticBytes)
+		sd.BotSkipped = dayStat(ss.BotSkippedDay, day, ss.BotSkipped)
+		includeSiteMeta := includeRootMeta || (metaSites != nil && metaSites[key])
+		if includeSiteMeta {
+			sd.SiteConflicts = ss.Conflicts
+			sd.SiteInvalid = ss.Invalid
+			sd.SiteMultiDomain = ss.MultiDomainLines
+		}
+		if includeSiteMeta && len(ss.SourceCnt) > 0 {
 			sd.SiteSourceCnt = make(map[string]int64, len(ss.SourceCnt))
 			for k, v := range ss.SourceCnt {
 				sd.SiteSourceCnt[k] = v

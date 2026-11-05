@@ -162,6 +162,14 @@ func detectAuto(line []byte, siteField string) (*Format, error) {
 			}
 			return &Format{Kind: KindCombined, Name: "combined", Warning: warning, parser: combinedExtParser{}}, nil
 		}
+		// 纯 combined + 末尾 host/server_name 的常见格式，尽量自动识别；
+		// 带多个扩展字段的组合仍要求显式 -log-format，避免把耗时字段误当站点。
+		var hf Fields
+		if (combinedHostParser{}).parse(line, &hf) && len(hf.Site) > 0 &&
+			(bytes.IndexByte(hf.Site, '.') >= 0 || bytes.IndexByte(hf.Site, ':') >= 0) &&
+			!looksFloatToken(hf.Site) && !isAllDigits(hf.Site) && string(hf.Site) != "-" {
+			return &Format{Kind: KindCombined, Name: "combined_host", parser: combinedHostParser{}}, nil
+		}
 		return nil, fmt.Errorf("检测到 combined 基础字段，但末尾额外字段无法安全识别；请用 -log-format 传完整 nginx log_format 模板。首行示例: %s", sample(line))
 	}
 	return nil, fmt.Errorf("无法自动识别该行，请用 -log-format 指定 json / combined / csv，或传 nginx log_format 模板。首行示例: %s", sample(line))
@@ -171,6 +179,18 @@ func detectAuto(line []byte, siteField string) (*Format, error) {
 type jsonParserPlaceholder struct{}
 
 func (jsonParserPlaceholder) parse([]byte, *Fields) bool { return false }
+
+func isAllDigits(b []byte) bool {
+	if len(b) == 0 {
+		return false
+	}
+	for _, c := range b {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
 
 func sample(line []byte) string {
 	const max = 220

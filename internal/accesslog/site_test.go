@@ -14,6 +14,17 @@ func TestCombinedHostParserSetsSite(t *testing.T) {
 	}
 }
 
+func TestAutoDetectCombinedHost(t *testing.T) {
+	line := `203.0.113.10 - - [30/Oct/2026:10:00:00 +0800] "GET /a HTTP/1.1" 200 100 "-" "curl/8" "www.example.com"`
+	f, err := DetectWithOptions([]byte(line), DetectOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Name != "combined_host" {
+		t.Fatalf("format=%s", f.Name)
+	}
+}
+
 func TestCSVHeaderSiteField(t *testing.T) {
 	first := "time,client,custom_domain,status,request,size\n2026-10-30T10:00:00+08:00,203.0.113.10,shop.example.com,200,GET /a HTTP/1.1,100"
 	f, err := DetectWithOptions([]byte(first), DetectOptions{SiteField: "custom_domain"})

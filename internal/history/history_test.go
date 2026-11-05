@@ -347,6 +347,9 @@ func TestDailySitesRoundTrip(t *testing.T) {
 	child.StaticSkipped = 2
 	child.StaticBytes = 1024
 	child.BotSkipped = 1
+	child.SiteConflicts = 2
+	child.SiteInvalid = 1
+	child.SiteMultiDomain = 3
 	child.SiteSourceCnt = map[string]int64{"map": 2, "field": 1}
 	root := NewDaily("2026-10-30", analyzer.NewAgg(), false)
 	root.Total = 3
@@ -366,6 +369,9 @@ func TestDailySitesRoundTrip(t *testing.T) {
 	c := got.Sites["d:example.com"]
 	if c.Site != "d:example.com" || c.SiteKind != "domain" || c.StaticSkipped != 2 || c.StaticBytes != 1024 || c.BotSkipped != 1 {
 		t.Fatalf("child = %+v", c)
+	}
+	if c.SiteConflicts != 2 || c.SiteInvalid != 1 || c.SiteMultiDomain != 3 {
+		t.Fatalf("site counters = %+v", c)
 	}
 	if c.SiteSourceCnt["map"] != 2 || c.SiteSourceCnt["field"] != 1 {
 		t.Fatalf("source = %+v", c.SiteSourceCnt)

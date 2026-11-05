@@ -96,8 +96,11 @@ go run ./cmd/nginx-report -logdir ./28888_access_json.log -reportdir ./test_repo
 ### 多站点
 
 - 默认不开启：未显式传 `-site-*` / `-site` 时不得解析站点字段、不得建站点 map，保持旧路径零额外开销。
-- 识别优先级：`-site-name` > 行内字段（`domain/host/http_host/server_name` 等）> `-site-map` > 文件名 > `(未识别站点)`；禁止用 URI/Referer/UA 猜域名。
+- 识别优先级：`-site-name` > 行内字段（`domain/host/http_host/server_name` 等）> `-site-map` > 文件名 > 目录名 > `(未识别站点)`；禁止用 URI/Referer/UA 猜域名。
+- 站点模式下 `-pattern` 不含路径分隔符时递归扫描子目录（适配 `/data/_log/<domain>/access.log`）；非站点模式仍只扫顶层。
+- 目录名推断只认合法域名/IP，`logs`、`backup`、日期目录等通用名不能当站点。
 - 站点识别失败绝不丢行；全站 PV 必须等于各站点 PV 之和（含 unknown / other）。
+- 同一行多个域名取第一个合法值，计 `MultiDomainLines`，不能重复计数。
 - 行内 IP 默认 `separate` 单独归类，不混入域名；`inherit`/`ignore` 只改归属，不改总数。
 - 站点 key 使用 `d:` / `i:` / `o:` / `u:` 前缀；目录用 `site.SafeDir`，禁止把原始域名直接拼路径。
 - `SiteMax` 超出归 `o:other`；新增站点级高基数维度同样要溢出桶。

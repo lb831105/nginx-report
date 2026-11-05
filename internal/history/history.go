@@ -103,8 +103,9 @@ type Daily struct {
 	BotSkipped    int64             `json:"bot_skipped,omitempty"`
 	SiteSourceCnt map[string]int64  `json:"site_source_cnt,omitempty"`
 	// SiteConflicts / SiteInvalid 行内域名与文件映射冲突、以及非法站点值计数。
-	SiteConflicts int64 `json:"site_conflicts,omitempty"`
-	SiteInvalid   int64 `json:"site_invalid,omitempty"`
+	SiteConflicts   int64 `json:"site_conflicts,omitempty"`
+	SiteInvalid     int64 `json:"site_invalid,omitempty"`
+	SiteMultiDomain int64 `json:"site_multi_domain,omitempty"`
 }
 
 // DailyDir 返回日记录目录

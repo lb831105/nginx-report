@@ -117,7 +117,7 @@ type Options struct {
 	SiteDefaultSource string
 	// SiteField 行内站点字段名；空表示按 site 别名自动尝试。
 	SiteField string
-	// SiteFrom auto / field / map / filename。
+	// SiteFrom auto / field / map / filename / dir。
 	SiteFrom string
 	// SiteIPMode separate / inherit / ignore。
 	SiteIPMode string
@@ -494,6 +494,48 @@ func capBytes(b []byte, max int) []byte {
 }
 
 // addSaturating 累加非负字节数，溢出时钉在 MaxInt64，避免大流量日志把统计写成负数。
+func addDayInt(m *map[string]int64, day string, v int64) {
+	if v <= 0 {
+		return
+	}
+	if day == "" {
+		day = "unknown"
+	}
+	if *m == nil {
+		*m = make(map[string]int64)
+	}
+	(*m)[day] += v
+}
+
+func addDaySaturating(m *map[string]int64, day string, v int64) {
+	if v <= 0 {
+		return
+	}
+	if day == "" {
+		day = "unknown"
+	}
+	if *m == nil {
+		*m = make(map[string]int64)
+	}
+	cur := (*m)[day]
+	addSaturating(&cur, v)
+	(*m)[day] = cur
+}
+
+func mergeDayI64(dst *map[string]int64, src map[string]int64) {
+	if len(src) == 0 {
+		return
+	}
+	if *dst == nil {
+		*dst = make(map[string]int64, mapCapHint(len(src), maxMapKeys))
+	}
+	for day, v := range src {
+		cur := (*dst)[day]
+		addSaturating(&cur, v)
+		(*dst)[day] = cur
+	}
+}
+
 func addSaturating(dst *int64, v int64) {
 	if v <= 0 {
 		return
@@ -541,8 +583,20 @@ func (a *Agg) MergeFrom(o *Agg) {
 	if o == nil || a == o {
 		return // 自我合并会凭空翻倍，直接忽略
 	}
+	// 接收方本身也可能是旧日记录：先把它的样本数补成 Total，再合并。
+	if a.TimedCount == 0 && a.Total > 0 &&
+		(a.TimeSum > 0 || a.MaxTime > 0 || (len(a.TimeBuckets) > 0 && a.TimeBuckets[0] > 0)) {
+		a.TimedCount = a.Total
+	}
 	a.Total += o.Total
-	a.TimedCount += o.TimedCount
+	if o.TimedCount > 0 {
+		a.TimedCount += o.TimedCount
+	} else if o.Total > 0 && (o.TimeSum > 0 || o.MaxTime > 0 || (len(o.TimeBuckets) > 0 && o.TimeBuckets[0] > 0)) {
+		// 旧版日记录没有 TimedCount；TimeSum/MaxTime/bucket0 有值说明这些
+		// 记录带耗时。合并时必须补上它们的样本数，否则和新记录混算时
+		// 平均响应/P95/P99 会用旧 TimeSum 除以新 TimedCount，数值偏大。
+		a.TimedCount += o.Total
+	}
 	addSaturating(&a.SizeTotal, o.SizeTotal)
 	a.ErrorCount += o.ErrorCount
 	a.SlowCount += o.SlowCount
@@ -869,14 +923,18 @@ type SiteStats struct {
 	Agg  Agg
 	Days map[string]*Agg
 
-	Skipped       int64
-	OutOfRange    int64
-	StaticSkipped int64
-	StaticBytes   int64
-	BotSkipped    int64
-	SourceCnt     map[string]int64
-	Conflicts     int64
-	Invalid       int64
+	Skipped          int64
+	OutOfRange       int64
+	StaticSkipped    int64
+	StaticBytes      int64
+	BotSkipped       int64
+	StaticSkippedDay map[string]int64
+	StaticBytesDay   map[string]int64
+	BotSkippedDay    map[string]int64
+	SourceCnt        map[string]int64
+	Conflicts        int64
+	Invalid          int64
+	MultiDomainLines int64
 }
 
 // ensureSite 取/创建站点统计；超过上限归入 (其他站点)。
@@ -902,6 +960,9 @@ func (s *FileStats) ensureSite(info site.Info, max int) *SiteStats {
 	st := &SiteStats{
 		Site: info.Key, Name: info.Name, Kind: info.Kind,
 		Days: make(map[string]*Agg), SourceCnt: make(map[string]int64),
+		StaticSkippedDay: make(map[string]int64),
+		StaticBytesDay:   make(map[string]int64),
+		BotSkippedDay:    make(map[string]int64),
 	}
 	st.Agg = *NewAgg()
 	s.Sites[info.Key] = st
@@ -910,7 +971,7 @@ func (s *FileStats) ensureSite(info site.Info, max int) *SiteStats {
 
 // MergeSiteDay 合并外部日记录中的站点统计。
 func (s *FileStats) MergeSiteDay(key, day string, agg *Agg, kind, name string,
-	staticSkipped, staticBytes, botSkipped, outOfRange, skipped, conflicts, invalid int64,
+	staticSkipped, staticBytes, botSkipped, outOfRange, skipped, conflicts, invalid, multi int64,
 	sources map[string]int64) {
 	if agg == nil {
 		return
@@ -936,12 +997,16 @@ func (s *FileStats) MergeSiteDay(key, day string, agg *Agg, kind, name string,
 	}
 	st.Agg.MergeFrom(agg)
 	st.StaticSkipped += staticSkipped
-	st.StaticBytes += staticBytes
+	addDayInt(&st.StaticSkippedDay, day, staticSkipped)
+	addSaturating(&st.StaticBytes, staticBytes)
+	addDaySaturating(&st.StaticBytesDay, day, staticBytes)
 	st.BotSkipped += botSkipped
+	addDayInt(&st.BotSkippedDay, day, botSkipped)
 	st.OutOfRange += outOfRange
 	st.Skipped += skipped
 	st.Conflicts += conflicts
 	st.Invalid += invalid
+	st.MultiDomainLines += multi
 	for k, v := range sources {
 		st.SourceCnt[k] += v
 	}
@@ -953,6 +1018,9 @@ func (s *SiteStats) AsFileStats() *FileStats {
 	fs.StaticSkipped = s.StaticSkipped
 	fs.StaticBytes = s.StaticBytes
 	fs.BotSkipped = s.BotSkipped
+	fs.StaticSkippedDay = s.StaticSkippedDay
+	fs.StaticBytesDay = s.StaticBytesDay
+	fs.BotSkippedDay = s.BotSkippedDay
 	fs.OutOfRange = s.OutOfRange
 	fs.Skipped = s.Skipped
 	return fs
@@ -969,6 +1037,10 @@ type FileStats struct {
 	StaticBytes int64
 	// BotSkipped 按 -exclude-bots 跳过的爬虫/探针请求数
 	BotSkipped int64
+	// 按天明细，供回退补写日记录时保持每天口径一致；旧记录没有这些 map。
+	StaticSkippedDay map[string]int64
+	StaticBytesDay   map[string]int64
+	BotSkippedDay    map[string]int64
 	// Format 实际识别的日志格式：json / combined / custom / csv / mixed
 	Format string
 	// FormatWarning 识别阶段的可读提示（不参与统计），例如 combined 末尾字段歧义
@@ -1202,21 +1274,21 @@ func jsonMapTarget(s string) (int, bool, bool) {
 }
 
 // resolveLineSite 解析行内站点；字段无效时回退文件默认站点，保证不丢日志。
-func resolveLineSite(fl *lineFields, opt *Options, def site.Info, defSource string) (site.Info, string, bool, bool) {
+func resolveLineSite(fl *lineFields, opt *Options, def site.Info, defSource string) (site.Info, string, bool, bool, bool) {
 	from := opt.SiteFrom
 	if from == "" {
 		from = "auto"
 	}
-	if opt.SiteForce || from == "map" || from == "filename" {
-		return def, defSource, false, false
+	if opt.SiteForce || from == "map" || from == "filename" || from == "dir" {
+		return def, defSource, false, false, false
 	}
 	v, ok := fl.get(fSite)
 	if !ok || len(v) == 0 {
-		return def, defSource, false, false
+		return def, defSource, false, false, false
 	}
-	info, ok := site.Normalize(string(v), opt.SiteStripWWW)
+	info, ok, n := site.NormalizeWithCount(string(v), opt.SiteStripWWW)
 	if !ok {
-		return def, defSource, false, true
+		return def, defSource, false, true, false
 	}
 	if info.Kind == site.KindDomain {
 		info = site.ApplyAlias(info, opt.SiteAliases)
@@ -1225,14 +1297,14 @@ func resolveLineSite(fl *lineFields, opt *Options, def site.Info, defSource stri
 		switch opt.SiteIPMode {
 		case "inherit":
 			if def.Kind == site.KindDomain {
-				return def, defSource, false, false
+				return def, defSource, false, false, n > 1
 			}
 		case "ignore":
-			return def, defSource, false, false
+			return def, defSource, false, false, n > 1
 		}
 	}
 	conflict := def.Kind == site.KindDomain && info.Kind == site.KindDomain && def.Name != info.Name
-	return info, "field", conflict, false
+	return info, "field", conflict, false, n > 1
 }
 
 // NewStats 初始化空的统计结构
@@ -1344,7 +1416,7 @@ func ProcessReader(rc io.Reader, opt Options) (*FileStats, error) {
 	if opt.SiteField != "" {
 		siteKeys = [][]byte{[]byte(opt.SiteField)}
 	}
-	parseSiteLine := opt.SiteEnabled && !opt.SiteForce && opt.SiteFrom != "map" && opt.SiteFrom != "filename"
+	parseSiteLine := opt.SiteEnabled && !opt.SiteForce && opt.SiteFrom != "map" && opt.SiteFrom != "filename" && opt.SiteFrom != "dir"
 	lineSite := siteDefault
 	siteSource := siteSourceDefault
 
@@ -1568,9 +1640,9 @@ func ProcessReader(rc io.Reader, opt Options) (*FileStats, error) {
 
 		// 站点解析：字段优先，失败回退文件默认站点；不因站点异常丢行。
 		lineSite, siteSource = siteDefault, siteSourceDefault
-		var siteConflict, siteInvalid bool
+		var siteConflict, siteInvalid, siteMulti bool
 		if opt.SiteEnabled {
-			lineSite, siteSource, siteConflict, siteInvalid = resolveLineSite(&fl, &opt, siteDefault, siteSourceDefault)
+			lineSite, siteSource, siteConflict, siteInvalid, siteMulti = resolveLineSite(&fl, &opt, siteDefault, siteSourceDefault)
 		}
 
 		// 爬虫/探针整行丢弃（默认关闭，显式 -exclude-bots 才生效）
@@ -1588,11 +1660,16 @@ func ProcessReader(rc io.Reader, opt Options) (*FileStats, error) {
 			if siteInvalid {
 				lineSiteStats.Invalid++
 			}
+			if siteMulti {
+				lineSiteStats.MultiDomainLines++
+			}
 		}
 		if opt.ExcludeBots && looksLikeBot(ua) {
 			stats.BotSkipped++
+			addDayInt(&stats.BotSkippedDay, lastDayKey, 1)
 			if lineSiteStats != nil {
 				lineSiteStats.BotSkipped++
+				addDayInt(&lineSiteStats.BotSkippedDay, lastDayKey, 1)
 			}
 			if lines++; lines%chunk == 0 {
 				th.tick()
@@ -1609,14 +1686,18 @@ func ProcessReader(rc io.Reader, opt Options) (*FileStats, error) {
 				}
 				if staticasset.IsBytes(v) {
 					stats.StaticSkipped++
+					addDayInt(&stats.StaticSkippedDay, lastDayKey, 1)
 					if lineSiteStats != nil {
 						lineSiteStats.StaticSkipped++
+						addDayInt(&lineSiteStats.StaticSkippedDay, lastDayKey, 1)
 					}
 					if sv, ok := fl.get(fSize); ok {
 						if n, ok2 := parseIntBytes(sv); ok2 {
 							addSaturating(&stats.StaticBytes, n)
+							addDaySaturating(&stats.StaticBytesDay, lastDayKey, n)
 							if lineSiteStats != nil {
 								addSaturating(&lineSiteStats.StaticBytes, n)
+								addDaySaturating(&lineSiteStats.StaticBytesDay, lastDayKey, n)
 							}
 						}
 					}
@@ -1803,6 +1884,9 @@ func (s *FileStats) Merge(o *FileStats) {
 	s.StaticSkipped += o.StaticSkipped
 	addSaturating(&s.StaticBytes, o.StaticBytes)
 	s.BotSkipped += o.BotSkipped
+	mergeDayI64(&s.StaticSkippedDay, o.StaticSkippedDay)
+	mergeDayI64(&s.StaticBytesDay, o.StaticBytesDay)
+	mergeDayI64(&s.BotSkippedDay, o.BotSkippedDay)
 	if o.Format != "" {
 		if s.Format == "" {
 			s.Format = o.Format
@@ -1848,12 +1932,16 @@ func (s *FileStats) Merge(o *FileStats) {
 				d.MergeFrom(agg)
 			}
 			dst.StaticSkipped += src.StaticSkipped
-			dst.StaticBytes += src.StaticBytes
+			addSaturating(&dst.StaticBytes, src.StaticBytes)
 			dst.BotSkipped += src.BotSkipped
+			mergeDayI64(&dst.StaticSkippedDay, src.StaticSkippedDay)
+			mergeDayI64(&dst.StaticBytesDay, src.StaticBytesDay)
+			mergeDayI64(&dst.BotSkippedDay, src.BotSkippedDay)
 			dst.OutOfRange += src.OutOfRange
 			dst.Skipped += src.Skipped
 			dst.Conflicts += src.Conflicts
 			dst.Invalid += src.Invalid
+			dst.MultiDomainLines += src.MultiDomainLines
 			for k, v := range src.SourceCnt {
 				dst.SourceCnt[k] += v
 			}

@@ -153,3 +153,15 @@ func TestSiteConflictCountedButKeepsLine(t *testing.T) {
 		t.Fatalf("conflicts=%d", st.Sites["d:shop.example.com"].Conflicts)
 	}
 }
+
+func TestSiteMultiDomainCountedFirstUsed(t *testing.T) {
+	line := `{"@timestamp":"2026-10-30T10:00:00+08:00","domain":"a.example.com b.example.com","client":"1.1.1.1","status":"200","request_uri":"/a","upstream_response_time":"0.010"}`
+	st, err := ProcessReader(strings.NewReader(line), Options{SiteEnabled: true, SiteIPMode: "separate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ss := st.Sites["d:a.example.com"]
+	if ss == nil || ss.Agg.Total != 1 || ss.MultiDomainLines != 1 {
+		t.Fatalf("sites=%+v", st.Sites)
+	}
+}
