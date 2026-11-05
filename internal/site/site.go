@@ -97,9 +97,8 @@ var (
 	fileLikeTLD = map[string]bool{
 		"log": true, "gz": true, "txt": true, "json": true, "bak": true,
 		"old": true, "out": true, "err": true, "error": true, "access": true,
-		"nginx": true, "app": true, "debug": true, "zip": true, "tar": true,
-		"1": true, "2": true, "3": true, "4": true, "5": true, "6": true,
-		"7": true, "8": true, "9": true, "0": true,
+		// app / zip 是真实 gTLD，不能当文件名后缀拒绝。
+		"nginx": true, "debug": true, "tar": true,
 	}
 )
 
@@ -267,19 +266,23 @@ func ApplyAlias(info Info, aliases map[string]string) Info {
 	if len(aliases) == 0 || info.Kind != KindDomain {
 		return info
 	}
+	source := info.Source
 	seen := 0
 	for seen < 8 {
 		target, ok := aliases[info.Name]
 		if !ok || target == "" || target == info.Name {
+			info.Source = source
 			return info
 		}
 		next, ok := Normalize(target, false)
 		if !ok {
+			info.Source = source
 			return info
 		}
 		info = next
 		seen++
 	}
+	info.Source = source
 	return info
 }
 
@@ -320,7 +323,9 @@ func FromFilename(name string, stripWWW bool) (Info, bool) {
 			break
 		}
 	}
-	base = fileDateRe.ReplaceAllString(base, "")
+	// 用分隔符替换日期，而不是直接删除：example.com_2026-10-30_access.log
+	// 不能变成 example.comaccess（会被误认为另一个合法域名）。
+	base = fileDateRe.ReplaceAllString(base, "_")
 	base = strings.Trim(base, "_-.")
 	if base == "" {
 		return Info{}, false
@@ -338,7 +343,8 @@ func FromFilename(name string, stripWWW bool) (Info, bool) {
 	for _, prefix := range []string{"access-", "access_", "nginx-", "nginx_", "error-", "error_", "app-", "app_", "log-", "log_", "www-", "www_"} {
 		base = strings.TrimPrefix(base, prefix)
 	}
-	for _, suffix := range []string{"-access", "_access", ".access", "-nginx", "_nginx", ".nginx", "-error", "_error", ".error", "-app", "_app", ".app", "-log", "_log"} {
+	// 不把 ".app" 当文件后缀：app 是真实 gTLD，example.app.log 是合法站点文件。
+	for _, suffix := range []string{"-access", "_access", ".access", "-nginx", "_nginx", ".nginx", "-error", "_error", ".error", "-app", "_app", "-log", "_log"} {
 		base = strings.TrimSuffix(base, suffix)
 	}
 	base = strings.Trim(base, "_-.")
@@ -371,8 +377,12 @@ func FromDir(path, root string, stripWWW bool) (Info, bool) {
 	for dir := filepath.Dir(abs); ; dir = filepath.Dir(dir) {
 		base := filepath.Base(dir)
 		if base != "" && base != "." && base != string(filepath.Separator) {
-			if info, ok := normalizeOne(base, stripWWW); ok && IsKnownKind(info.Kind) {
-				return info, true
+			// 目录名 access.log / backup.json 是日志目录，不是站点；
+			// 不要因为语法上像域名就生成一个假站点。
+			if tld := base[strings.LastIndexByte(base, '.')+1:]; !fileLikeTLD[tld] {
+				if info, ok := normalizeOne(base, stripWWW); ok && IsKnownKind(info.Kind) {
+					return info, true
+				}
 			}
 		}
 		// root 本身也要检查：单文件模式 -logdir /data/_log/ad.kmrd.cn/access.log

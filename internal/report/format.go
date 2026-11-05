@@ -60,6 +60,23 @@ func Formats(spec string) []string {
 	return out
 }
 
+// ValidateFormats 在启动阶段校验 -format；不能让拼写错误静默回退到 html。
+func ValidateFormats(spec string) error {
+	if strings.TrimSpace(spec) == "" {
+		return nil
+	}
+	for _, part := range strings.Split(spec, ",") {
+		key := strings.ToLower(strings.TrimSpace(part))
+		if key == "" || key == "all" {
+			continue
+		}
+		if _, ok := formatAliases[key]; !ok {
+			return fmt.Errorf("未知格式 %q（可选 html / pdf / xlsx / all，可用逗号组合）", strings.TrimSpace(part))
+		}
+	}
+	return nil
+}
+
 // FormatNames 便于日志/帮助信息展示
 func FormatNames() string {
 	return fmt.Sprintf("%s（默认） / %s / %s（别名 xls, excel），可用逗号组合，或 all", FormatHTML, FormatPDF, FormatXLSX)

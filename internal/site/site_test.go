@@ -159,7 +159,7 @@ func TestLoadMapAndResolver(t *testing.T) {
 		t.Fatal(err)
 	}
 	got = r.ResolveFile(filepath.Join(logDir, "whatever.log"))
-	if got.Key != "d:api.example.com" || got.Source != "name" {
+	if got.Key != "d:example.com" {
 		t.Fatalf("forced resolve = %+v", got)
 	}
 }
@@ -226,5 +226,40 @@ func TestResolverModeDirectory(t *testing.T) {
 	got = r.ResolveFile(filepath.Join(root, "shop.kmrd.cn", "access.log"))
 	if got.Key != UnknownKey {
 		t.Fatalf("filename-only = %+v", got)
+	}
+}
+
+func TestNormalizeKeepsRealTLDs(t *testing.T) {
+	for _, raw := range []string{"example.app", "example.zip"} {
+		if info, ok := Normalize(raw, false); !ok || info.Name != raw {
+			t.Fatalf("Normalize(%q)=%+v ok=%v", raw, info, ok)
+		}
+	}
+}
+
+func TestFromDirRejectsFileLikeDirectory(t *testing.T) {
+	root := t.TempDir()
+	logDir := filepath.Join(root, "access.log")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if info, ok := FromDir(filepath.Join(logDir, "x.log"), root, false); ok {
+		t.Fatalf("FromDir should reject access.log directory, got %+v", info)
+	}
+}
+
+func TestFromFilenameDateSeparatorKeepsHost(t *testing.T) {
+	for _, name := range []string{
+		"example.com_2026-10-30_access.log",
+		"example.com-2026-10-30-access.log",
+		"access-example.com_2026-10-30.log",
+	} {
+		info, ok := FromFilename(name, false)
+		if !ok || info.Name != "example.com" {
+			t.Fatalf("FromFilename(%q)=%+v ok=%v", name, info, ok)
+		}
+	}
+	if info, ok := FromFilename("example.app.log", false); !ok || info.Name != "example.app" {
+		t.Fatalf("FromFilename(example.app.log)=%+v ok=%v", info, ok)
 	}
 }

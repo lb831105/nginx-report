@@ -91,7 +91,7 @@ type Config struct {
 	SiteMap       string
 	SiteAliasMap  string
 	SiteReport    string // aggregate / both / per
-	SiteFrom      string // auto / field / map / filename
+	SiteFrom      string // auto / field / map / filename / dir
 	SiteField     string
 	SiteName      string
 	SiteFilter    string

@@ -78,7 +78,7 @@ func main() {
 	siteFromFlag := flag.String("site-from", cfg.SiteFrom, "站点来源: auto / field / map / filename / dir")
 	siteFieldFlag := flag.String("site-field", cfg.SiteField, "行内站点字段名，如 domain、server_name、host")
 	siteNameFlag := flag.String("site-name", cfg.SiteName, "强制所有日志归属该站点（适合单文件）")
-	siteFilterFlag := flag.String("site", cfg.SiteFilter, "只输出指定站点，逗号分隔")
+	siteFilterFlag := flag.String("site", cfg.SiteFilter, "只生成指定站点的独立报告，逗号分隔")
 	siteIPModeFlag := flag.String("site-ip-mode", cfg.SiteIPMode, "IP 直连处理: separate / inherit / ignore")
 	siteIPReportFlag := flag.String("site-ip-report", cfg.SiteIPReport, "IP 直连报告: none / group / per-ip")
 	siteStripWWWFlag := flag.Bool("site-strip-www", cfg.SiteStripWWW, "将 www.example.com 归并到 example.com")
@@ -204,6 +204,11 @@ func main() {
 	}
 	if err := analyzer.ValidateJSONFields(cfg.JSONFields); err != nil {
 		logger.Error("-json-fields 无效: %v", err)
+		logger.CloseLogFile()
+		os.Exit(1)
+	}
+	if err := report.ValidateFormats(cfg.Format); err != nil {
+		logger.Error("-format 无效: %v", err)
 		logger.CloseLogFile()
 		os.Exit(1)
 	}
@@ -485,7 +490,7 @@ func usage() {
   -site-from   站点来源：auto（默认）/ field / map / filename / dir
   -site-field  行内站点字段名，如 domain / server_name / host
   -site-name   强制所有日志归属一个站点（适合单文件/单站点目录）
-  -site        只输出指定站点，逗号分隔（仅 weekly / 单文件）
+  -site        只生成指定站点的独立报告，逗号分隔（仅 weekly / 单文件）
   -site-ip-mode IP 直连处理：separate（默认）/ inherit / ignore
   -site-ip-report IP 直连报告：none / group / per-ip
   -site-strip-www 将 www.example.com 归并到 example.com
@@ -915,7 +920,7 @@ func runDaily(cfg *config.Config, day string) error {
 		}
 	}
 
-	grand := analyzer.NewStats()
+	grand := newFileStats(cfg)
 	for i, fpath := range files {
 		fname := filepath.Base(fpath)
 		logger.Info("[%d/%d] 处理 %s ...", i+1, len(files), fname)
@@ -1021,7 +1026,7 @@ func runWeekly(cfg *config.Config, start, end string) error {
 		}
 	}
 
-	grand := analyzer.NewStats()
+	grand := newFileStats(cfg)
 	var missing []string
 	partialRecs := make(map[string]*history.Daily)
 	for _, day := range windowDays {
@@ -1055,7 +1060,11 @@ func runWeekly(cfg *config.Config, start, end string) error {
 		grand.StaticBytes += d.StaticBytes
 		grand.BotSkipped += d.BotSkipped
 		if cfg.SiteEnabled {
-			for key, sd := range d.Sites {
+			for _, key := range sortedDailySiteKeys(d.Sites) {
+				sd := d.Sites[key]
+				if sd == nil {
+					continue
+				}
 				grand.MergeSiteDay(key, day, sd.ToAgg(), sd.SiteKind, sd.SiteName,
 					sd.StaticSkipped, sd.StaticBytes, sd.BotSkipped, 0, 0,
 					sd.SiteConflicts, sd.SiteInvalid, sd.SiteMultiDomain, sd.SiteSourceCnt)
@@ -1081,7 +1090,7 @@ func runWeekly(cfg *config.Config, start, end string) error {
 			}
 			logger.Info("回退读取日志 %s ~ %s，共 %d 个文件", fallbackStart, fallbackEnd, len(files))
 
-			dayStats := analyzer.NewStats()
+			dayStats := newFileStats(cfg)
 			formats := make(map[string]bool)
 			for i, fpath := range files {
 				stats, perr := analyzer.ProcessFileWithOptions(fpath,
@@ -1131,7 +1140,11 @@ func runWeekly(cfg *config.Config, start, end string) error {
 				}
 				grand.MergeDay(day, agg)
 				if cfg.SiteEnabled {
-					for key, ss := range dayStats.Sites {
+					for _, key := range sortedSiteKeys(dayStats.Sites) {
+						ss := dayStats.Sites[key]
+						if ss == nil {
+							continue
+						}
 						sa := ss.Days[day]
 						if sa == nil || sa.Total == 0 {
 							continue
@@ -1157,7 +1170,11 @@ func runWeekly(cfg *config.Config, start, end string) error {
 					continue
 				}
 				siteMeta := make(map[string]bool)
-				for key, ss := range dayStats.Sites {
+				for _, key := range sortedSiteKeys(dayStats.Sites) {
+					ss := dayStats.Sites[key]
+					if ss == nil {
+						continue
+					}
 					if ss.Days[day] != nil && ss.Days[day].Total > 0 && !dailySiteMeta[key] {
 						siteMeta[key] = true
 					}
@@ -1190,7 +1207,11 @@ func runWeekly(cfg *config.Config, start, end string) error {
 		grand.StaticBytes += d.StaticBytes
 		grand.BotSkipped += d.BotSkipped
 		if cfg.SiteEnabled {
-			for key, sd := range d.Sites {
+			for _, key := range sortedDailySiteKeys(d.Sites) {
+				sd := d.Sites[key]
+				if sd == nil {
+					continue
+				}
 				grand.MergeSiteDay(key, day, sd.ToAgg(), sd.SiteKind, sd.SiteName,
 					sd.StaticSkipped, sd.StaticBytes, sd.BotSkipped, 0, 0,
 					sd.SiteConflicts, sd.SiteInvalid, sd.SiteMultiDomain, sd.SiteSourceCnt)
@@ -1265,13 +1286,15 @@ func runWeeklySingleFile(cfg *config.Config) error {
 	return finishWeekly(cfg, stats, start, end, days, false)
 }
 
-// siteRowList 汇总全站报告里的站点行。默认按 PV 降序。
-func siteRowList(cfg *config.Config, grand *analyzer.FileStats) []report.SiteRow {
+// siteRowList 汇总站点行。applyFilter=true 时只保留 -site 指定的站点。
+// 全站报告始终使用完整站点对比，避免“总 PV 包含未选站点、对比表只有选中站点”
+// 导致百分比加起来不到 100%。
+func siteRowList(cfg *config.Config, grand *analyzer.FileStats, applyFilter bool) []report.SiteRow {
 	if grand == nil || len(grand.Sites) == 0 {
 		return nil
 	}
 	filter := map[string]bool(nil)
-	if cfg.SiteFilter != "" {
+	if applyFilter && cfg.SiteFilter != "" {
 		aliases := map[string]string(nil)
 		if cfg.SiteAliasMap != "" {
 			if r := site.NewResolver(cfg.LogDir, cfg.SiteStripWWW); r.LoadAliases(cfg.SiteAliasMap) == nil {
@@ -1317,13 +1340,17 @@ func siteRowFrom(key, name, kind string, agg *analyzer.Agg, ss *analyzer.SiteSta
 }
 
 // mergeSitesByKind 合并某一类站点，用于 -site-ip-report group。
-func mergeSitesByKind(grand *analyzer.FileStats, kind site.Kind, key, name string) *analyzer.SiteStats {
+// allowed 非 nil 时只合并 -site 选中的站点。
+func mergeSitesByKind(grand *analyzer.FileStats, kind site.Kind, key, name string, allowed map[string]bool) *analyzer.SiteStats {
 	if grand == nil || len(grand.Sites) == 0 {
 		return nil
 	}
 	var out *analyzer.SiteStats
-	for _, ss := range grand.Sites {
+	for sk, ss := range grand.Sites {
 		if ss == nil || ss.Kind != kind || ss.Agg.Total == 0 {
+			continue
+		}
+		if allowed != nil && !allowed[sk] {
 			continue
 		}
 		if out == nil {
@@ -1348,6 +1375,9 @@ func mergeSitesByKind(grand *analyzer.FileStats, kind site.Kind, key, name strin
 		out.StaticSkipped += ss.StaticSkipped
 		out.StaticBytes += ss.StaticBytes
 		out.BotSkipped += ss.BotSkipped
+		out.Conflicts += ss.Conflicts
+		out.Invalid += ss.Invalid
+		out.MultiDomainLines += ss.MultiDomainLines
 		for src, n := range ss.SourceCnt {
 			out.SourceCnt[src] += n
 		}
@@ -1514,7 +1544,8 @@ func finishWeekly(cfg *config.Config, grand *analyzer.FileStats, start, end stri
 		return fmt.Errorf("创建报告目录失败: %v", err)
 	}
 
-	rows := siteRowList(cfg, grand)
+	rows := siteRowList(cfg, grand, false)
+	siteRows := siteRowList(cfg, grand, true)
 	if cfg.SiteEnabled {
 		if len(rows) == 0 && len(grand.Sites) == 0 {
 			logger.Warn("未识别到任何站点；默认 combined 不包含 host/domain 字段，请使用 -site-map / -site-name 或修改 log_format")
@@ -1572,13 +1603,13 @@ func finishWeekly(cfg *config.Config, grand *analyzer.FileStats, start, end stri
 
 	// 每站点报告：默认只生成域名站点；IP 直连默认只在全站报告展示。
 	var index []report.SiteIndexEntry
-	if cfg.SiteEnabled && cfg.SiteReport != "aggregate" && len(rows) > 0 {
+	if cfg.SiteEnabled && cfg.SiteReport != "aggregate" && len(siteRows) > 0 {
 		limit := cfg.SiteMaxReport
 		if limit <= 0 {
 			limit = 100
 		}
 		generated := 0
-		for _, row := range rows {
+		for _, row := range siteRows {
 			if generated >= limit {
 				break
 			}
@@ -1611,14 +1642,21 @@ func finishWeekly(cfg *config.Config, grand *analyzer.FileStats, start, end stri
 	// -site-ip-report group：把 IP 直连站点合并成一份报告，避免每 IP 一个目录。
 	if cfg.SiteEnabled && cfg.SiteReport != "aggregate" && cfg.SiteIPReport == "group" && cfg.SiteName == "" {
 		hasIP := false
-		for _, row := range rows {
+		for _, row := range siteRows {
 			if row.Kind == string(site.KindIP) {
 				hasIP = true
 				break
 			}
 		}
 		if hasIP && (cfg.SiteMaxReport <= 0 || len(index) < cfg.SiteMaxReport) {
-			group := mergeSitesByKind(grand, site.KindIP, "i:group", "(IP直连合计)")
+			var allowed map[string]bool
+			if cfg.SiteFilter != "" {
+				allowed = make(map[string]bool, len(siteRows))
+				for _, r := range siteRows {
+					allowed[r.Key] = true
+				}
+			}
+			group := mergeSitesByKind(grand, site.KindIP, "i:group", "(IP直连合计)", allowed)
 			if group != nil && group.Agg.Total >= cfg.SiteMinPV {
 				row := siteRowFrom("i:group", "(IP直连合计)", string(site.KindIP), &group.Agg, group)
 				dir := filepath.Join(cfg.ReportDir, "sites", "ip", "_group")
@@ -1659,6 +1697,61 @@ func logSource(cfg *config.Config) string {
 		return ""
 	}
 	return filepath.Join(cfg.LogDir, cfg.LogPattern)
+}
+
+// sortedSiteKeys 按 PV 降序返回站点 key，确保 -site-max 截断时可复现。
+func sortedSiteKeys(m map[string]*analyzer.SiteStats) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.SliceStable(keys, func(i, j int) bool {
+		a, b := m[keys[i]], m[keys[j]]
+		at, bt := int64(0), int64(0)
+		if a != nil {
+			at = a.Agg.Total
+		}
+		if b != nil {
+			bt = b.Agg.Total
+		}
+		if at != bt {
+			return at > bt
+		}
+		return keys[i] < keys[j]
+	})
+	return keys
+}
+
+// sortedDailySiteKeys 按日记录里的站点 PV 降序排序。
+func sortedDailySiteKeys(m map[string]*history.Daily) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.SliceStable(keys, func(i, j int) bool {
+		a, b := m[keys[i]], m[keys[j]]
+		at, bt := int64(0), int64(0)
+		if a != nil {
+			at = a.Total
+		}
+		if b != nil {
+			bt = b.Total
+		}
+		if at != bt {
+			return at > bt
+		}
+		return keys[i] < keys[j]
+	})
+	return keys
+}
+
+// newFileStats 创建汇总统计，并把站点上限带到多文件合并层。
+func newFileStats(cfg *config.Config) *analyzer.FileStats {
+	st := analyzer.NewStats()
+	if cfg.SiteEnabled {
+		st.SiteLimit = cfg.SiteMax
+	}
+	return st
 }
 
 // processOptions 组装日志处理选项（含 CPU 节流配置）

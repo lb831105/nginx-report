@@ -165,3 +165,64 @@ func TestSiteMultiDomainCountedFirstUsed(t *testing.T) {
 		t.Fatalf("sites=%+v", st.Sites)
 	}
 }
+
+func TestFileStatsMergeRespectsSiteLimit(t *testing.T) {
+	lines := strings.Join([]string{
+		`{"@timestamp":"2026-10-30T10:00:00+08:00","domain":"a.example.com","client":"c","status":"200","request_uri":"/a","upstream_response_time":"0.010"}`,
+		`{"@timestamp":"2026-10-30T10:01:00+08:00","domain":"b.example.com","client":"c","status":"200","request_uri":"/b","upstream_response_time":"0.010"}`,
+		`{"@timestamp":"2026-10-30T10:02:00+08:00","domain":"c.example.com","client":"c","status":"200","request_uri":"/c","upstream_response_time":"0.010"}`,
+	}, "\n")
+	src, err := ProcessReader(strings.NewReader(lines), Options{SiteEnabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst := NewStats()
+	dst.SiteLimit = 2
+	dst.Merge(src)
+	if dst.Agg.Total != 3 {
+		t.Fatalf("total=%d", dst.Agg.Total)
+	}
+	if len(dst.Sites) != 3 || dst.Sites["o:other"] == nil || dst.Sites["o:other"].Agg.Total != 1 {
+		t.Fatalf("sites=%+v", dst.Sites)
+	}
+	if dst.Sites["d:a.example.com"] == nil || dst.Sites["d:b.example.com"] == nil || dst.Sites["d:c.example.com"] != nil {
+		t.Fatalf("deterministic top sites expected, got %+v", dst.Sites)
+	}
+	var sum int64
+	for _, ss := range dst.Sites {
+		sum += ss.Agg.Total
+	}
+	if sum != dst.Agg.Total {
+		t.Fatalf("site sum=%d total=%d", sum, dst.Agg.Total)
+	}
+}
+
+func TestMergeSiteDayRespectsSiteLimit(t *testing.T) {
+	dst := NewStats()
+	dst.SiteLimit = 1
+	for i, key := range []string{"d:a.example.com", "d:b.example.com"} {
+		agg := NewAgg()
+		agg.Total = 1
+		dst.MergeSiteDay(key, "2026-10-30", agg, "domain", key[2:], 0, 0, 0, 0, 0, 0, 0, 0, nil)
+		_ = i
+	}
+	if dst.Sites["o:other"] == nil || dst.Sites["o:other"].Agg.Total != 1 {
+		t.Fatalf("sites=%+v", dst.Sites)
+	}
+}
+
+func TestSiteOverflowBucketDoesNotConsumeNamedSlot(t *testing.T) {
+	dst := NewStats()
+	dst.SiteLimit = 2
+	mk := func(key string) *Agg {
+		a := NewAgg()
+		a.Total = 1
+		return a
+	}
+	dst.MergeSiteDay(site.OtherKey, "2026-10-30", mk("o"), "other", site.OtherName, 0, 0, 0, 0, 0, 0, 0, 0, nil)
+	dst.MergeSiteDay("d:a.example.com", "2026-10-30", mk("a"), "domain", "a.example.com", 0, 0, 0, 0, 0, 0, 0, 0, nil)
+	dst.MergeSiteDay("d:b.example.com", "2026-10-30", mk("b"), "domain", "b.example.com", 0, 0, 0, 0, 0, 0, 0, 0, nil)
+	if dst.Sites["d:a.example.com"] == nil || dst.Sites["d:b.example.com"] == nil || dst.Sites["o:other"] == nil {
+		t.Fatalf("sites=%+v", dst.Sites)
+	}
+}

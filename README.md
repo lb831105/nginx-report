@@ -6,6 +6,8 @@
 - 两种使用方式：**一次性执行**（cron 定时）或**常驻服务**（进程内自带调度）
 - 产物：HTML 周报 + 日记录/周汇总 JSON（用于周报聚合与环比）+ 运维/开发图文报告（`*_ops.html` / `*_ops.txt`）
 
+> 完整可复制使用样例（单文件、目录、多站点、CSV/自定义格式、常驻服务等）见 [USAGE.md](USAGE.md)。
+
 ---
 
 ## 一、快速开始
@@ -315,7 +317,7 @@ go run ./cmd/nginx-report -mode daily -logdir /data/_log/backup -debug
 | `-site-from` | `auto` | 站点来源：`auto`（字段 > 映射 > 文件名 > 目录名 > 未识别）/ `field` / `map` / `filename` / `dir` |
 | `-site-field` | 空 | 行内站点字段名；空=自动尝试 `domain`/`host`/`http_host`/`server_name` 等别名 |
 | `-site-name` | 空 | 强制所有日志归属该站点（单文件/单站点目录最省事） |
-| `-site` | 空 | 只输出指定站点，逗号分隔；仅 weekly / 单文件模式 |
+| `-site` | 空 | 只生成指定站点的独立报告，逗号分隔（全站报告仍展示全部站点）；仅 weekly / 单文件模式 |
 | `-site-ip-mode` | `separate` | 行内 IP 直连：`separate` 单独站点 / `inherit` 继承文件站点 / `ignore` 忽略行内 IP |
 | `-site-ip-report` | `none` | IP 直连报告：`none`（只在全站展示；`-site-name` 强制站点仍生成）/ `group`（合并一份）/ `per-ip`（每个 IP 一份） |
 | `-site-strip-www` | `false` | 把 `www.example.com` 归并到 `example.com`（应用别名前） |

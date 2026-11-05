@@ -126,6 +126,9 @@ func (r *Resolver) LoadAliases(path string) error {
 		if !ok1 || !ok2 || a.Kind != KindDomain || t.Kind != KindDomain {
 			return fmt.Errorf("%s:%d 别名/主站点必须是合法域名", path, lineNo)
 		}
+		if r.Aliases == nil {
+			r.Aliases = make(map[string]string)
+		}
 		r.Aliases[a.Name] = t.Name
 	}
 	if err := sc.Err(); err != nil {
@@ -139,6 +142,9 @@ func (r *Resolver) SetForced(raw string) error {
 	info, ok := Normalize(raw, r.StripWWW)
 	if !ok {
 		return fmt.Errorf("站点 %q 无效", raw)
+	}
+	if info.Kind == KindDomain {
+		info = ApplyAlias(info, r.Aliases)
 	}
 	info.Source = "name"
 	r.Forced = &info

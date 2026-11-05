@@ -951,7 +951,13 @@ func (s *FileStats) ensureSite(info site.Info, max int) *SiteStats {
 	if max <= 0 {
 		max = 1000
 	}
-	if len(s.Sites) >= max {
+	// 溢出桶本身不占 -site-max 的名额：否则合并时先遇到 o:other
+	// 会挤掉真实站点，导致保留哪些站点取决于 map 遍历顺序。
+	named := len(s.Sites)
+	if _, ok := s.Sites[site.OtherKey]; ok {
+		named--
+	}
+	if named >= max && info.Key != site.OtherKey {
 		info = site.Other()
 		if st := s.Sites[info.Key]; st != nil {
 			return st
@@ -983,7 +989,11 @@ func (s *FileStats) MergeSiteDay(key, day string, agg *Agg, kind, name string,
 	if name != "" {
 		info.Name = name
 	}
-	st := s.ensureSite(info, 1000)
+	max := 1000
+	if s.SiteLimit > 0 {
+		max = s.SiteLimit
+	}
+	st := s.ensureSite(info, max)
 	if day != "" {
 		if st.Days == nil {
 			st.Days = make(map[string]*Agg)
@@ -1053,6 +1063,10 @@ type FileStats struct {
 	Days map[string]*Agg
 	// Sites 站点维度统计；仅在 Options.SiteEnabled 时填充。
 	Sites map[string]*SiteStats
+	// SiteLimit 合并/回填站点统计时的数量上限；0 表示使用默认 1000。
+	// 解析阶段也会按 Options.SiteMax 建站点，这里保证多文件合并与日记录
+	// 回填不会绕过 -site-max。
+	SiteLimit int
 }
 
 // DaySummary 每日汇总
@@ -1340,6 +1354,9 @@ func ProcessFileWithOptions(fpath string, opt Options) (*FileStats, error) {
 // 也让 IO 策略（gz/普通文件）和统计逻辑各自独立演进。
 func ProcessReader(rc io.Reader, opt Options) (*FileStats, error) {
 	stats := NewStats()
+	if opt.SiteEnabled {
+		stats.SiteLimit = opt.SiteMax
+	}
 
 	// 日期边界预先转成整数，避免逐行字符串比较
 	var startInt, endInt int64
@@ -1873,10 +1890,37 @@ func formatDateInt(v int64) string {
 	return fmt.Sprintf("%04d-%02d-%02d", v/10000, v/100%100, v%100)
 }
 
+// sortedSiteStatsKeys 按 PV 降序返回站点 key，保证 -site-max 截断时
+// 保留哪些站点不依赖 Go map 的随机遍历顺序。
+func sortedSiteStatsKeys(m map[string]*SiteStats) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.SliceStable(keys, func(i, j int) bool {
+		a, b := m[keys[i]], m[keys[j]]
+		at, bt := int64(0), int64(0)
+		if a != nil {
+			at = a.Agg.Total
+		}
+		if b != nil {
+			bt = b.Agg.Total
+		}
+		if at != bt {
+			return at > bt
+		}
+		return keys[i] < keys[j]
+	})
+	return keys
+}
+
 // Merge 将 o 合并到 s
 func (s *FileStats) Merge(o *FileStats) {
 	if o == nil {
 		return
+	}
+	if s.SiteLimit == 0 && o.SiteLimit > 0 {
+		s.SiteLimit = o.SiteLimit
 	}
 	s.Agg.MergeFrom(&o.Agg)
 	s.Skipped += o.Skipped
@@ -1916,12 +1960,20 @@ func (s *FileStats) Merge(o *FileStats) {
 		d.MergeFrom(agg)
 	}
 	if len(o.Sites) > 0 {
-		for key, src := range o.Sites {
+		max := 1000
+		if s.SiteLimit > 0 {
+			max = s.SiteLimit
+		}
+		for _, key := range sortedSiteStatsKeys(o.Sites) {
+			src := o.Sites[key]
+			if src == nil {
+				continue
+			}
 			info := site.Info{Key: src.Site, Name: src.Name, Kind: src.Kind}
 			if info.Key == "" {
 				info = site.ParseKey(key)
 			}
-			dst := s.ensureSite(info, 1000)
+			dst := s.ensureSite(info, max)
 			dst.Agg.MergeFrom(&src.Agg)
 			for day, agg := range src.Days {
 				d := dst.Days[day]
